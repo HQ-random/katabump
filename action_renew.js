@@ -397,7 +397,12 @@ async function attemptTurnstileCdp(page) {
                 }
                 // --------------------------------------------
 
+                // 点击登录按钮并等待页面跳转
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
+                console.log('⏳ 等待登录后页面跳转...');
+                await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 })
+                    .catch(e => console.log('⚠️ 导航等待超时，但继续执行...'));
+                console.log('📍 登录后 URL:', await page.url());
 
                 // User Request: Check for incorrect password
                 try {
@@ -417,14 +422,25 @@ async function attemptTurnstileCdp(page) {
                 console.log('登录错误:', e.message);
             }
 
+            if (!(await page.url()).includes('dashboard')) {
+                console.error('❌ 登录后未进入 Dashboard，可能是登录失败或验证码拦截。');
+                // 可以截个图方便调试（代码里已有截图逻辑，但可能未执行）
+                continue; // 跳过该用户
+            }
+
             console.log('正在寻找 "See" 链接...');
             try {
-                await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
-                await page.waitForTimeout(1000);
-                await page.getByRole('link', { name: 'See' }).first().click();
+                // 使用更通用的方式：直接根据文本查找，不限定 role
+                const seeLink = page.locator('a:has-text("See")').first();
+                await seeLink.waitFor({ state: 'visible', timeout: 20000 });
+                console.log('✅ 找到 "See" 链接，准备点击...');
+                await seeLink.click();
             } catch (e) {
-                console.log('未找到 "See" 按钮。');
-                continue;
+                console.error('❌ 未找到 "See" 链接。错误:', e.message);
+                // 打印当前页面部分 HTML 帮助调试
+                const htmlSnippet = await page.evaluate(() => document.body.innerText.slice(0, 500));
+                console.log('📄 当前页面文本片段:', htmlSnippet);
+                continue; // 跳过该用户
             }
 
             // --- Renew 逻辑 ---
