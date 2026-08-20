@@ -361,65 +361,109 @@ async function attemptTurnstileCdp(page) {
                 const pwdInput = page.getByRole('textbox', { name: 'Password' });
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
-
-                // --- Cloudflare Turnstile Bypass for Login ---
-                console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
-                let cdpClickResult = false;
-                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
-                    cdpClickResult = await attemptTurnstileCdp(page);
-                    if (cdpClickResult) break;
-                    await page.waitForTimeout(1000);
-                }
-
-                if (cdpClickResult) {
-                    console.log('   >> 登录 CDP 点击生效。正在等待最多 10秒 Cloudflare 成功标志...');
-                    for (let waitSec = 0; waitSec < 10; waitSec++) {
-                        const frames = page.frames();
-                        let isSuccess = false;
-                        for (const f of frames) {
-                            if (f.url().includes('cloudflare')) {
-                                try {
-                                    if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                        isSuccess = true;
-                                        break;
+            
+                // 循环尝试登录，最多 3 次，每次重试前处理 Turnstile
+                let loginAttempts = 0;
+                let loginSuccess = false;
+                while (loginAttempts < 3 && !loginSuccess) {
+                    loginAttempts++;
+                    console.log(`   >> 登录尝试 ${loginAttempts}/3`);
+            
+                    // 1. 处理 Turnstile（如果存在）
+                    let turnstilePassed = false;
+                    for (let retry = 0; retry < 20; retry++) {
+                        const cdpClicked = await attemptTurnstileCdp(page);
+                        if (cdpClicked) {
+                            console.log('   >> CDP 点击 Turnstile 成功，等待验证...');
+                            // 等待最多 15 秒，检测 "Success!" 标志
+                            for (let w = 0; w < 15; w++) {
+                                const frames = page.frames();
+                                let foundSuccess = false;
+                                for (const f of frames) {
+                                    if (f.url().includes('cloudflare')) {
+                                        try {
+                                            if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
+                                                foundSuccess = true;
+                                                break;
+                                            }
+                                        } catch (e) {}
                                     }
-                                } catch (e) { }
+                                }
+                                if (foundSuccess) {
+                                    console.log('   >> Turnstile 验证成功！');
+                                    turnstilePassed = true;
+                                    break;
+                                }
+                                await page.waitForTimeout(1000);
                             }
+                            if (turnstilePassed) break;
                         }
-                        if (isSuccess) {
-                            console.log('   >> 登录前 Turnstile 验证成功。');
-                            break;
-                        }
+                        console.log(`   >> 等待 Turnstile 出现 (${retry+1}/20)...`);
                         await page.waitForTimeout(1000);
                     }
-                } else {
-                    console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
-                }
-                // --------------------------------------------
-
-                // 点击登录按钮并等待页面跳转
-                await page.getByRole('button', { name: 'Login', exact: true }).click();
-                console.log('⏳ 等待登录后页面跳转...');
-                await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 })
-                    .catch(e => console.log('⚠️ 导航等待超时，但继续执行...'));
-                console.log('📍 登录后 URL:', await page.url());
-
-                // User Request: Check for incorrect password
-                try {
-                    const errorMsg = page.getByText('Incorrect password or no account');
-                    if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-                        const failShotPath = path.join(photoDir, `${safeUsername}.png`);
-                        try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-
-                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
-
-                        continue;
+            
+                    if (!turnstilePassed) {
+                        console.log('   ⚠️ Turnstile 未能成功验证，可能被拦截，但继续尝试登录...');
                     }
-                } catch (e) { }
-
+            
+                    // 2. 点击登录按钮
+                    await page.getByRole('button', { name: 'Login', exact: true }).click();
+                    console.log('⏳ 等待登录后页面跳转...');
+                    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 })
+                        .catch(e => console.log('⚠️ 导航等待超时，但继续...'));
+            
+                    // 3. 检查是否进入 Dashboard
+                    const currentUrl = await page.url();
+                    console.log('📍 登录后 URL:', currentUrl);
+            
+                    if (currentUrl.includes('dashboard')) {
+                        loginSuccess = true;
+                        console.log('✅ 登录成功，进入 Dashboard');
+                        break;
+                    } else if (currentUrl.includes('login') && currentUrl.includes('error=captcha')) {
+                        console.log('   ❌ 登录返回 captcha 错误，重试...');
+                        // 重试前，刷新页面或重新加载登录页？
+                        await page.goto('https://dashboard.katabump.com/auth/login');
+                        await page.waitForTimeout(2000);
+                        // 重新填入账号密码（因为页面刷新了）
+                        const emailInput2 = page.getByRole('textbox', { name: 'Email' });
+                        await emailInput2.fill(user.username);
+                        const pwdInput2 = page.getByRole('textbox', { name: 'Password' });
+                        await pwdInput2.fill(user.password);
+                        continue; // 重新尝试
+                    } else {
+                        // 其他错误，检查是否有密码错误提示
+                        try {
+                            const errorMsg = page.getByText('Incorrect password or no account');
+                            if (await errorMsg.isVisible({ timeout: 3000 })) {
+                                console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
+                                const failShotPath = path.join(photoDir, `${safeUsername}.png`);
+                                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) {}
+                                await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
+                                break; // 跳出 while
+                            }
+                        } catch (e) {}
+                        // 若未进入 dashboard 且没有明确错误，重试
+                        console.log('   ❌ 登录未知失败，重试...');
+                        await page.goto('https://dashboard.katabump.com/auth/login');
+                        await page.waitForTimeout(2000);
+                        // 重新填入账号密码
+                        // 但此时可能仍在登录页，我们需要重新填充
+                        const emailInput3 = page.getByRole('textbox', { name: 'Email' });
+                        await emailInput3.fill(user.username);
+                        const pwdInput3 = page.getByRole('textbox', { name: 'Password' });
+                        await pwdInput3.fill(user.password);
+                    }
+                }
+            
+                if (!loginSuccess) {
+                    console.error('❌ 登录失败，跳过该用户');
+                    continue; // 跳过此用户
+                }
+            
             } catch (e) {
                 console.log('登录错误:', e.message);
+                continue;
             }
 
             if (!(await page.url()).includes('dashboard')) {
