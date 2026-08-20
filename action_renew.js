@@ -191,7 +191,7 @@ function getUsers() {
     return [];
 }
 
-// ---------- 修改后的 attemptTurnstileCdp ----------
+// ---------- 修改后的 attemptTurnstileCdp (只返回真正验证成功) ----------
 async function attemptTurnstileCdp(page) {
     const frames = page.frames();
     for (const frame of frames) {
@@ -199,8 +199,8 @@ async function attemptTurnstileCdp(page) {
             const done = await frame.evaluate(() => window.__turnstile_done).catch(() => false);
             if (done) {
                 console.log('>> Turnstile 复选框已被注入脚本自动点击');
-                // 等待 Cloudflare "Success!" 标志（最多15秒）
-                for (let w = 0; w < 15; w++) {
+                // 等待 Cloudflare "Success!" 标志（最多20秒）
+                for (let w = 0; w < 20; w++) {
                     const allFrames = page.frames();
                     let found = false;
                     for (const f of allFrames) {
@@ -219,8 +219,8 @@ async function attemptTurnstileCdp(page) {
                     }
                     await page.waitForTimeout(1000);
                 }
-                console.log('>> 未检测到 Success!，但复选框已点击，继续...');
-                return true;
+                console.log('>> 验证超时，未检测到 Success!');
+                return false;   // 关键：未成功则返回 false
             }
         } catch (e) {}
     }
@@ -314,30 +314,40 @@ async function attemptTurnstileCdp(page) {
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
+                // ---------- 登录尝试循环（最多3次） ----------
                 let loginAttempts = 0;
                 let loginSuccess = false;
                 while (loginAttempts < 3 && !loginSuccess) {
                     loginAttempts++;
                     console.log(`   >> 登录尝试 ${loginAttempts}/3`);
 
-                    // 处理 Turnstile（自动点击 + 等待验证）
-                    console.log('   >> 等待 Turnstile 自动点击和验证...');
+                    // 等待 Turnstile 验证成功（最多20次重试）
+                    console.log('   >> 等待 Turnstile 验证...');
                     let turnstilePassed = false;
                     for (let retry = 0; retry < 20; retry++) {
                         const clicked = await attemptTurnstileCdp(page);
                         if (clicked) {
-                            console.log('   >> Turnstile 处理完成');
+                            console.log('   >> Turnstile 验证成功！');
                             turnstilePassed = true;
                             break;
                         }
-                        console.log(`   >> 等待 Turnstile 出现 (${retry+1}/20)...`);
-                        await page.waitForTimeout(1000);
-                    }
-                    if (!turnstilePassed) {
-                        console.log('   ⚠️ Turnstile 未成功，但继续尝试登录...');
+                        console.log(`   >> Turnstile 验证未完成 (${retry+1}/20)，等待...`);
+                        await page.waitForTimeout(2000);
                     }
 
-                    // 点击登录
+                    if (!turnstilePassed) {
+                        console.log('   ❌ Turnstile 验证失败，刷新页面重试...');
+                        await page.reload();
+                        await page.waitForTimeout(3000);
+                        // 重新填入账号密码（因为刷新后清空了）
+                        const emailInput2 = page.getByRole('textbox', { name: 'Email' });
+                        await emailInput2.fill(user.username);
+                        const pwdInput2 = page.getByRole('textbox', { name: 'Password' });
+                        await pwdInput2.fill(user.password);
+                        continue; // 重试当前登录尝试
+                    }
+
+                    // 验证通过，点击登录按钮
                     await page.getByRole('button', { name: 'Login', exact: true }).click();
                     console.log('⏳ 等待登录后页面跳转...');
                     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 })
@@ -351,15 +361,17 @@ async function attemptTurnstileCdp(page) {
                         console.log('✅ 登录成功，进入 Dashboard');
                         break;
                     } else if (currentUrl.includes('login') && currentUrl.includes('error=captcha')) {
-                        console.log('   ❌ 登录返回 captcha 错误，重试...');
+                        console.log('   ❌ 登录返回 captcha 错误，可能验证未通过，重试...');
                         await page.goto('https://dashboard.katabump.com/auth/login');
                         await page.waitForTimeout(2000);
-                        const emailInput2 = page.getByRole('textbox', { name: 'Email' });
-                        await emailInput2.fill(user.username);
-                        const pwdInput2 = page.getByRole('textbox', { name: 'Password' });
-                        await pwdInput2.fill(user.password);
+                        // 重新填充
+                        const emailInput3 = page.getByRole('textbox', { name: 'Email' });
+                        await emailInput3.fill(user.username);
+                        const pwdInput3 = page.getByRole('textbox', { name: 'Password' });
+                        await pwdInput3.fill(user.password);
                         continue;
                     } else {
+                        // 检查密码错误
                         try {
                             const errorMsg = page.getByText('Incorrect password or no account');
                             if (await errorMsg.isVisible({ timeout: 3000 })) {
@@ -373,10 +385,10 @@ async function attemptTurnstileCdp(page) {
                         console.log('   ❌ 登录未知失败，重试...');
                         await page.goto('https://dashboard.katabump.com/auth/login');
                         await page.waitForTimeout(2000);
-                        const emailInput3 = page.getByRole('textbox', { name: 'Email' });
-                        await emailInput3.fill(user.username);
-                        const pwdInput3 = page.getByRole('textbox', { name: 'Password' });
-                        await pwdInput3.fill(user.password);
+                        const emailInput4 = page.getByRole('textbox', { name: 'Email' });
+                        await emailInput4.fill(user.username);
+                        const pwdInput4 = page.getByRole('textbox', { name: 'Password' });
+                        await pwdInput4.fill(user.password);
                     }
                 }
 
@@ -396,6 +408,7 @@ async function attemptTurnstileCdp(page) {
                 continue;
             }
 
+            // 查找 "See" 链接（保持原有逻辑不变）
             console.log('正在寻找 "See" 链接...');
             try {
                 const seeLink = page.locator('a:has-text("See")').first();
